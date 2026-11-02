@@ -1,0 +1,78 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:        # ручной запуск кнопкой Run workflow
+  push:
+    tags:
+      - 'v*'                # или автоматически при создании тега v1.0, v1.1 ...
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest        # Apple Silicon (M1/M2/M3/M4)
+            arch: arm64
+            pandoc_pattern: "*-arm64-macOS.zip"
+          - runner: macos-15-intel      # Intel-маки
+            arch: x86_64
+            pandoc_pattern: "*-x86_64-macOS.zip"
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"        # сборка python.org с рабочим Tk
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pypandoc pyinstaller
+
+      - name: Download pandoc for ${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir pandoc_dl
+          gh release download --repo jgm/pandoc --pattern "${{ matrix.pandoc_pattern }}" --dir pandoc_dl
+          unzip -q pandoc_dl/*.zip -d pandoc_dl/unpacked
+          cp "$(find pandoc_dl/unpacked -type f -name pandoc | head -n 1)" ./pandoc
+          chmod +x ./pandoc
+          file ./pandoc
+          ./pandoc --version | head -n 1
+
+      - name: Build MathToWord.app
+        run: pyinstaller --noconfirm MathToWord_mac.spec
+
+      - name: Check bundle
+        run: |
+          ls dist/MathToWord.app/Contents/MacOS
+          P="$(find dist/MathToWord.app -name pandoc -type f | head -n 1)"
+          echo "Bundled pandoc: $P"
+          "$P" --version | head -n 1
+          codesign -dv dist/MathToWord.app 2>&1 || true
+
+      - name: Zip (ditto keeps permissions and symlinks)
+        run: ditto -c -k --sequesterRsrc --keepParent dist/MathToWord.app MathToWord-macOS-${{ matrix.arch }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MathToWord-macOS-${{ matrix.arch }}
+          path: MathToWord-macOS-${{ matrix.arch }}.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: MathToWord-macOS-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: MathToWord-macOS-*.zip
